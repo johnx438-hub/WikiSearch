@@ -1,0 +1,9 @@
+# turbovecWikiTest01 — 依赖清单
+
+turbovec>=0.3.0
+whoosh>=2.7.4
+numpy>=1.24.0
+jieba>=0.42.0
+
+# Embedding模型通过 Ollama 本地服务提供（qwen3-embedding:8b）
+# ollama pull qwen3-embedding:8b
