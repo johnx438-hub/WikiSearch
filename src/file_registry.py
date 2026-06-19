@@ -84,6 +84,15 @@ class FileRegistry:
                 )
             """)
             
+            # 创建 chunk_mapping 表（持久化 _file_to_chunks）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_mapping (
+                    file_id TEXT,
+                    chunk_id INTEGER,
+                    PRIMARY KEY (file_id, chunk_id)
+                )
+            """)
+            
             # 创建索引加速查询
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_status 
@@ -435,5 +444,103 @@ class FileRegistry:
         except Exception as e:
             print(f"❌ 清理失败: {e}")
             return []
+        finally:
+            conn.close()
+    
+    # ==================== Chunk ID 映射（持久化 _file_to_chunks）====================
+    
+    def save_chunk_mapping(self, file_id: str, chunk_ids: List[int]) -> bool:
+        """
+        保存 file_id → chunk_ids 的映射关系。
+        
+        Args:
+            file_id: UUID5 文件 ID
+            chunk_ids: chunk IDs 列表
+            
+        Returns:
+            True: 成功保存
+        """
+        conn = self._get_connection()
+        try:
+            # 确保表存在
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chunk_mapping (
+                    file_id TEXT,
+                    chunk_id INTEGER,
+                    PRIMARY KEY (file_id, chunk_id)
+                )
+            """)
+            
+            # 先删除旧映射
+            conn.execute("DELETE FROM chunk_mapping WHERE file_id = ?", (file_id,))
+            
+            # 插入新映射
+            for chunk_id in chunk_ids:
+                conn.execute(
+                    "INSERT INTO chunk_mapping (file_id, chunk_id) VALUES (?, ?)",
+                    (file_id, chunk_id)
+                )
+            
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"❌ 保存chunk映射失败 {file_id}: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_chunk_ids(self, file_id: str) -> List[int]:
+        """
+        获取文件对应的 chunk IDs。
+        
+        Args:
+            file_id: UUID5 文件 ID
+            
+        Returns:
+            chunk IDs 列表
+        """
+        conn = self._get_connection()
+        try:
+            rows = conn.execute("""
+                SELECT chunk_id FROM chunk_mapping WHERE file_id = ? ORDER BY chunk_id
+            """, (file_id,)).fetchall()
+            
+            return [row['chunk_id'] for row in rows]
+        except Exception as e:
+            print(f"❌ 获取chunk映射失败 {file_id}: {e}")
+            return []
+        finally:
+            conn.close()
+    
+    def delete_chunk_mapping(self, file_id: str) -> bool:
+        """删除文件的 chunk 映射"""
+        conn = self._get_connection()
+        try:
+            conn.execute("DELETE FROM chunk_mapping WHERE file_id = ?", (file_id,))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"❌ 删除chunk映射失败 {file_id}: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_max_chunk_id(self) -> int:
+        """
+        获取最大 chunk ID（用于恢复 ID 计数器）。
+        
+        Returns:
+            最大 chunk ID，不存在则返回 0
+        """
+        conn = self._get_connection()
+        try:
+            row = conn.execute("""
+                SELECT COALESCE(MAX(chunk_id), 0) as max_id FROM chunk_mapping
+            """).fetchone()
+            
+            return row['max_id'] if row else 0
+        except Exception as e:
+            print(f"❌ 获取最大chunk ID失败: {e}")
+            return 0
         finally:
             conn.close()

@@ -86,6 +86,7 @@ class WikiIndex:
         self._init_embedder()
         self._init_registry()
         self._init_docstore()
+        self._restore_state()  # 恢复 ID 计数器和 file_to_chunks 映射
     
     def _init_bm25_index(self):
         """初始化BM25倒排索引（Whoosh + jieba 中文分词）"""
@@ -148,6 +149,24 @@ class WikiIndex:
         """初始化 DocStore（SQLite 持久化文档存储）"""
         docstore_path = self.db_path / "docstore.db"
         self._doc_store = DocStore(db_path=str(docstore_path))
+    
+    def _restore_state(self):
+        """恢复 ID 计数器和 file_to_chunks 映射（从注册表加载）"""
+        # 1. 恢复 ID 计数器（用最大 chunk_id + 1）
+        self._id_counter = self.registry.get_max_chunk_id()
+        
+        # 2. 恢复 file_to_chunks 映射（从注册表批量加载）
+        conn = self.registry._get_connection()
+        try:
+            rows = conn.execute("""
+                SELECT DISTINCT file_id FROM chunk_mapping
+            """).fetchall()
+            
+            for row in rows:
+                file_id = row['file_id']
+                self._file_to_chunks[file_id] = self.registry.get_chunk_ids(file_id)
+        finally:
+            conn.close()
     
     # ==================== 核心接口 ====================
     
@@ -261,13 +280,14 @@ class WikiIndex:
             allowlist=candidate_ids
         )
         
-        # 转换为 (id, score) 列表并排序（score越大越相关）
+        # 转换为 (id, score) 列表（距离→相似度：score = 1 - distance）
         results = []
-        for rid, score in zip(ranked_ids[0], scores[0]):
-            results.append((int(rid), float(score)))
+        for rid, dist in zip(ranked_ids[0], scores[0]):
+            similarity = 1.0 - float(dist)  # 距离转相似度
+            results.append((int(rid), similarity))
         
-        # TurboVec返回的分数是距离（越小越相关），转换为相似度
-        results.sort(key=lambda x: x[1])  # 按score升序排列
+        # 按相似度降序排列（越大越相关）
+        results.sort(key=lambda x: x[1], reverse=True)
         
         return results[:k]
     
@@ -517,15 +537,19 @@ class WikiIndex:
         Returns:
             {department, date, ...}
         """
+        from datetime import datetime
         metadata = {}
         
-        # 从文件名提取日期（YYYYMMDD格式）
+        # 从文件名提取日期（YYYYMMDD格式）→ 转 datetime 对象
         filename = filepath.stem
         import re
         date_match = re.search(r'(\d{8})', filename)
         if date_match:
             date_str = date_match.group(1)
-            metadata["date"] = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+            try:
+                metadata["date"] = datetime.strptime(date_str, "%Y%m%d")
+            except ValueError:
+                pass  # 日期格式不对就跳过
         
         # 从文件名提取部门（如果文件名包含部门信息）
         if "_" in filename:
@@ -720,6 +744,9 @@ class WikiIndex:
             except Exception as e:
                 errors.append({"file": file_path, "error": str(e)})
         
+        # 6. 统一保存 TurboVec 索引（所有文件处理完后只写一次磁盘）
+        self.vec_index.write(str(self.db_path / "vec_index.tvim"))
+        
         return {
             'added': added_count,
             'modified': modified_count,
@@ -729,7 +756,7 @@ class WikiIndex:
     
     def _process_file(self, file_path: str, content_hash: str) -> List[int]:
         """
-        处理单个文件：转换 → 切片 → Embedding → 入库。
+        处理单个文件：转换 → 切片 → Embedding → 入库（批量写入优化版）。
         
         Args:
             file_path: 文件路径
@@ -750,57 +777,79 @@ class WikiIndex:
         if not chunks:
             return []
         
-        # 4. 为每个 chunk 分配 ID 并写入各层
-        chunk_ids = []
+        # 4. 预分配所有 chunk IDs
+        chunk_ids = [self._allocate_id() for _ in chunks]
+        
+        # 5. 构建元数据（L1/L2 父子联动）
+        metadata_base = self._extract_metadata(Path(file_path), content)
         current_l1_id = None
         
-        for chunk in chunks:
-            doc_id = self._allocate_id()
-            chunk_ids.append(doc_id)
-            
+        chunk_metas = []
+        for i, chunk in enumerate(chunks):
             if chunk.chunk_type == "L1":
-                current_l1_id = doc_id
+                current_l1_id = chunk_ids[i]
                 parent_id_str = ""
             else:
                 parent_id_str = str(current_l1_id) if current_l1_id else ""
             
-            # 构建元数据
-            metadata = self._extract_metadata(Path(file_path), content)
-            chunk_meta = {
-                **metadata,
+            chunk_metas.append({
+                **metadata_base,
                 "chunk_type": chunk.chunk_type,
                 "parent_id": parent_id_str,
                 "chunk_order": chunk.order,
                 "total_chunks": len(chunks),
-                "file_id": file_id,  # 新增：关联到文件 ID
+                "file_id": file_id,
+            })
+        
+        # 6. 批量生成 Embedding（Ollama batch API）
+        embeddings = self.embedder.embed_batch([c.content for c in chunks])
+        if embeddings is None:
+            embeddings = [self.embedder.embed(c.content) for c in chunks]
+        
+        # 7a. 批量写入 BM25（一次性 commit）
+        writer = self.bm25_index.writer()
+        for i, (chunk, doc_id) in enumerate(zip(chunks, chunk_ids)):
+            doc_dict = {
+                "id": str(doc_id),
+                "title": chunk.title,
+                "content": chunk.content,
             }
-            
-            # 写入 BM25
-            self._write_to_bm25(doc_id, chunk.title, chunk.content, chunk_meta)
-            
-            # 生成 Embedding 并写入 TurboVec
-            embedding = self.embedder.embed(chunk.content)
-            if embedding is not None:
-                self.vec_index.add_with_ids(
-                    np.array([embedding], dtype=np.float32),
-                    np.array([doc_id], dtype=np.uint64)
-                )
-            
-            # 写入 DocStore
+            doc_dict.update(chunk_metas[i])
+            writer.add_document(**doc_dict)
+        writer.commit()
+        
+        # 7b. 批量写入 TurboVec（一次性 add）
+        valid_embeddings = []
+        valid_ids = []
+        for i, (emb, doc_id) in enumerate(zip(embeddings, chunk_ids)):
+            if emb is not None:
+                # L2 归一化（提升余弦相似度精度）
+                norm = np.linalg.norm(emb)
+                if norm > 0:
+                    emb = emb / norm
+                valid_embeddings.append(emb)
+                valid_ids.append(doc_id)
+        
+        if valid_embeddings:
+            self.vec_index.add_with_ids(
+                np.array(valid_embeddings, dtype=np.float32),
+                np.array(valid_ids, dtype=np.uint64)
+            )
+        
+        # 7c. 批量写入 DocStore
+        for i, (chunk, doc_id) in enumerate(zip(chunks, chunk_ids)):
             self._doc_store[doc_id] = {
                 "content": chunk.content,
                 "title": chunk.title,
-                "metadata": chunk_meta,
+                "metadata": chunk_metas[i],
                 "filepath": file_path,
             }
         
-        # 5. 保存 TurboVec 索引
-        self.vec_index.write(str(self.db_path / "vec_index.tvim"))
-        
-        # 6. 更新注册表：file_id → chunk_ids 映射
+        # 8. 更新内存和注册表：file_id → chunk_ids 映射（持久化）
         self._file_to_chunks[file_id] = chunk_ids
+        self.registry.save_chunk_mapping(file_id, chunk_ids)
         
-        # 7. 标记索引完成
+        # 9. 标记索引完成
         self.registry.mark_indexed(file_path, chunk_count=len(chunk_ids))
         
         return chunk_ids
@@ -817,28 +866,28 @@ class WikiIndex:
         """
         chunk_ids = self._file_to_chunks.get(file_id, [])
         
+        if not chunk_ids:
+            return []
+        
+        # 批量从三层删除
         for doc_id in chunk_ids:
-            # 从 DocStore 删除
-            if doc_id in self._doc_store:
-                del self._doc_store[doc_id]
+            # DocStore
+            del self._doc_store[doc_id]
             
-            # 从 TurboVec 删除
+            # TurboVec
             self.vec_index.remove(doc_id)
             
-            # 从 BM25 删除
-            with self.bm25_index.reader() as reader:
-                for internal_id in reader.all_doc_ids():
-                    fields = reader.stored_fields(internal_id)
-                    if int(fields["id"]) == doc_id:
-                        writer = self.bm25_index.writer()
-                        writer.delete_by_term("id", str(doc_id))
-                        writer.commit()
-                        break
+            # BM25（直接 delete_by_term，不用遍历）
+            writer = self.bm25_index.writer()
+            writer.delete_by_term("id", str(doc_id))
         
-        # 保存 TurboVec
-        self.vec_index.write(str(self.db_path / "vec_index.tvim"))
+        # 一次性 commit BM25
+        writer.commit()
         
-        # 清理映射
+        # 清理注册表映射
+        self.registry.delete_chunk_mapping(file_id)
+        
+        # 清理内存映射
         if file_id in self._file_to_chunks:
             del self._file_to_chunks[file_id]
         

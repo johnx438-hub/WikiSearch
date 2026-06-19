@@ -132,6 +132,7 @@ class Embedder:
         """
         import urllib.request
         
+        # 尝试批量 API，失败则回退到逐个调用
         payload = json.dumps({
             "model": self.model_name,
             "input": texts,
@@ -144,9 +145,18 @@ class Embedder:
             method="POST",
         )
         
-        with urllib.request.urlopen(req, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
-            return result.get("embeddings")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+                embeddings = result.get("embeddings")
+                if embeddings and len(embeddings) == len(texts):
+                    return embeddings
+        except Exception:
+            pass  # 批量API不可用，回退到逐个调用
+        
+        # 回退：逐个调用（兼容旧版Ollama）
+        print("⚠️ Ollama batch API不可用，回退到逐个调用")
+        return [self._embed_ollama(t) for t in texts]
     
     def _embed_openai(self, text: str) -> Optional[List[float]]:
         """

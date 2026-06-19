@@ -139,8 +139,15 @@ class DocStore:
         Returns:
             True: 成功存储
         """
+        from datetime import datetime
+        
         conn = self._get_connection()
         try:
+            # 处理 datetime 对象转字符串
+            if metadata:
+                for key, val in metadata.items():
+                    if isinstance(val, datetime):
+                        metadata[key] = val.isoformat()
             metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
             
             conn.execute("""
