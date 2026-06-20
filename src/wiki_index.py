@@ -274,10 +274,13 @@ class WikiIndex:
         if query_vector is None:
             return []
         
+        # 过滤掉向量索引中不存在的 ID（防止三层不一致）
+        valid_candidates = [cid for cid in candidate_ids if self.vec_index.contains(cid)]
+        
         scores, ranked_ids = self.vec_index.search(
             np.array([query_vector], dtype=np.float32),
-            k=min(k, len(candidate_ids)),
-            allowlist=candidate_ids
+            k=min(k, len(valid_candidates)),
+            allowlist=np.array(valid_candidates, dtype=np.uint64)
         )
         
         # 转换为 (id, score) 列表（距离→相似度：score = 1 - distance）

@@ -84,11 +84,11 @@ class MarkdownChunker:
         # 提取文档标题（第一个 ## 或文件名）
         doc_title = self._extract_doc_title(content, filename)
         
-        # 按 ## 标题分割（支持 ## 到 ######，但只认 ## 作为章节边界）
-        sections = re.split(r'(?=^## )', content, flags=re.MULTILINE)
+        # 按 H1-H6 标题分割（支持所有级别的 Markdown 标题）
+        sections = re.split(r'(?=^#{1,6} )', content, flags=re.MULTILINE)
         sections = [s.strip() for s in sections if s.strip()]
         
-        # 如果没有找到任何 ## 标题，整个文档作为一个L1 chunk
+        # 如果没有找到任何标题，整个文档作为一个L1 chunk
         if not sections:
             chunks.append(Chunk(
                 content=content,
@@ -101,8 +101,8 @@ class MarkdownChunker:
         
         l1_order = 0
         for section in sections:
-            # 提取章节标题和内容
-            heading_match = re.match(r'^(##[^\n]*)\n(.*)', section, re.DOTALL)
+            # 提取章节标题和内容（支持 H1-H6）
+            heading_match = re.match(r'^(#{1,6}[^\n]*)\n(.*)', section, re.DOTALL)
             if not heading_match:
                 continue
             
@@ -174,14 +174,14 @@ class MarkdownChunker:
                 order=1,
             )]
         
-        # 长文档：按章节分割，每个章节内自适应调整
-        sections = re.split(r'(?=^## )', content, flags=re.MULTILINE)
+        # 长文档：按章节分割，每个章节内自适应调整（支持 H1-H6）
+        sections = re.split(r'(?=^#{1,6} )', content, flags=re.MULTILINE)
         sections = [s.strip() for s in sections if s.strip()]
         
         chunks = []
         order = 0
         for section in sections:
-            heading_match = re.match(r'^(##[^\n]*)\n(.*)', section, re.DOTALL)
+            heading_match = re.match(r'^(#{1,6}[^\n]*)\n(.*)', section, re.DOTALL)
             if not heading_match:
                 continue
             

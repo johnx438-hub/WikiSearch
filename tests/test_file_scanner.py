@@ -281,7 +281,7 @@ def test_generate_file_id():
     print("="*60)
     
     # 同一路径应该产生相同 ID
-    path = "/home/archer/docs/report.docx"
+    path = "/path/to/docs/report.docx"
     id1 = generate_file_id(path)
     id2 = generate_file_id(path)
     
@@ -290,7 +290,7 @@ def test_generate_file_id():
     print(f"   ID: {id1}")
     
     # 不同路径产生不同 ID
-    path2 = "/home/archer/docs/other.docx"
+    path2 = "/path/to/docs/other.docx"
     id3 = generate_file_id(path2)
     assert id1 != id3, "不同路径应该生成不同ID"
     print(f"✅ 不同路径产生不同ID")

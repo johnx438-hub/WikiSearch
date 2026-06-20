@@ -13,7 +13,7 @@
     )
     
     # 首次扫描
-    current_scan = scanner.scan_directories(['/home/archer/docs'])
+    current_scan = scanner.scan_directories(['/path/to/your/docs'])
     
     # 增量检测（对比上次的注册表）
     changes = scanner.get_incremental_changes(previous_registry, current_scan)
