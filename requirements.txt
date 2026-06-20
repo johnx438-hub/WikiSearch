@@ -10,6 +10,7 @@ pyyaml>=6.0
 python-docx>=1.1.0          # DOCX 解析
 pymupdf>=1.23.0             # PDF 解析（PyMuPDF）
 pymupdf4llm>=0.0.17         # PyMuPDF4LLM（可选，用于高质量 PDF→Markdown）
+rapidocr-onnxruntime>=1.0   # OCR 回退（纯 CPU，无需 Tesseract）
 
 # Embedding模型通过 Ollama 本地服务提供（qwen3-embedding:8b）
 # ollama pull qwen3-embedding:8b

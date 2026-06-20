@@ -658,7 +658,7 @@ class WikiIndex:
         store_count = len(self._doc_store)
         
         # 计算压缩率（假设原始float32）
-        actual_dim = self.vec_index.dim  # 从 TurboVec 实例获取实际维度
+        actual_dim = self.vec_index.dim or 4096  # 从 TurboVec 实例获取实际维度，默认 4096
         original_size = vec_count * actual_dim * 4  # float32 = 4 bytes
         compressed_size = vec_count * (actual_dim / 8) * self.bit_width  # bit-packed
         compression_ratio = original_size / compressed_size if compressed_size > 0 else 0

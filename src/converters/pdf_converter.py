@@ -34,6 +34,13 @@ except ImportError:
     ToMarkdownExtra = None
     HAS_PYMUPDF4LLM = False
 
+# RapidOCR 导入（纯 CPU，无需 Tesseract）
+try:
+    from rapidocr_onnxruntime import RapidOCR
+    HAS_RAPIDOCR = True
+except ImportError:
+    HAS_RAPIDOCR = False
+
 
 # ==================== 数据结构 ====================
 
@@ -78,17 +85,33 @@ class PdfConverter:
         ocr_language: OCR 语言（'chi_sim' | 'eng' | 'chi_sim+eng'）
     """
     
-    def __init__(self, use_ocr: bool = True, ocr_language: str = 'chi_sim+eng', chunk_size: int = 50):
+    def __init__(self, use_ocr: bool = True, ocr_language: str = 'chi_sim+eng', 
+                 chunk_size: int = 50, ocr_use_cuda: bool = False):
         """
         Args:
             use_ocr: 是否启用 OCR 回退（默认 True）
-            ocr_language: OCR 语言
+            ocr_language: OCR 语言 ('chi_sim' | 'eng' | 'chi_sim+eng')
             chunk_size: 超大文件分块处理大小（默认 50 页/块）
+            ocr_use_cuda: 是否使用 CUDA 加速（默认 False，纯 CPU）
         """
         self.use_ocr = use_ocr
         self.ocr_language = ocr_language
         self.chunk_size = chunk_size
         self._pymupdf4llm_available = HAS_PYMUPDF4LLM
+        
+        # 初始化 RapidOCR 引擎（惰性加载，避免无 OCR 需求时浪费资源）
+        self._ocr_engine = None
+        if use_ocr and HAS_RAPIDOCR:
+            try:
+                self._ocr_engine = RapidOCR(
+                    use_tensorrt=False,
+                    simd_version=None,
+                    cls_use_cuda=ocr_use_cuda,
+                    rec_use_cuda=ocr_use_cuda,
+                    det_use_cuda=ocr_use_cuda,
+                )
+            except Exception as e:
+                print(f"⚠️ RapidOCR 初始化失败，OCR 回退将不可用: {e}")
     
     def convert(self, filepath: str, output_dir: Optional[str] = None) -> Dict:
         """
@@ -383,7 +406,7 @@ class PdfConverter:
     
     def _extract_pages(self, doc: fitz.Document, start: int, end: Optional[int], show_progress: bool = False) -> str:
         """
-        提取指定页码范围的内容（支持超大文件分块处理）。
+        提取指定页码范围的内容（支持超大文件分块处理 + OCR 回退）。
         
         Args:
             doc: PyMuPDF Document 对象
@@ -406,23 +429,29 @@ class PdfConverter:
         
         # 小文件：直接提取
         if not self._pymupdf4llm_available:
-            return self._extract_with_pymupdf(doc, start, end)
-        
-        try:
-            # 使用 PyMuPDF4LLM（保留布局、表格、公式）
-            if ToMarkdownExtra is not None:
+            text = self._extract_with_pymupdf(doc, start, end)
+        else:
+            try:
+                # 使用 PyMuPDF4LLM（保留布局、表格、公式）
                 md = ToMarkdownExtra(
                     doc,
                     pages=list(range(start, end)),
                     write_images=False,
                     write_assets_dir=None
                 )
-                return md
-        except Exception as e:
-            print(f"⚠️ PyMuPDF4LLM 提取失败，回退到原生提取: {e}")
+                text = md
+            except Exception as e:
+                print(f"⚠️ PyMuPDF4LLM 提取失败，回退到原生提取: {e}")
+                text = self._extract_with_pymupdf(doc, start, end)
         
-        # 回退方案
-        return self._extract_with_pymupdf(doc, start, end)
+        # OCR 回退：如果文本太少或为空，尝试 OCR
+        if self.use_ocr and self._ocr_engine:
+            ocr_text = self._extract_with_ocr(doc, start, end)
+            if ocr_text and len(ocr_text.strip()) > len(text.strip()):
+                print(f"      🔍 OCR 回退触发：原生文本 {len(text)} 字 → OCR {len(ocr_text)} 字")
+                text = ocr_text
+        
+        return text
     
     def _extract_pages_chunked(self, doc: fitz.Document, start: int, end: int,
                                 show_progress: bool = False) -> str:
@@ -527,6 +556,51 @@ class PdfConverter:
             lines.append('| ' + ' | '.join(row[:len(headers)]) + ' |')
         
         return '\n'.join(lines)
+    
+    def _extract_with_ocr(self, doc: fitz.Document, start: int, end: Optional[int]) -> str:
+        """
+        使用 RapidOCR 对 PDF 页面进行 OCR 识别（纯 CPU，无需 Tesseract）。
+        
+        Args:
+            doc: PyMuPDF Document 对象
+            start: 起始页码（0-indexed）
+            end: 结束页码（exclusive）
+            
+        Returns:
+            OCR 识别的文本内容
+        """
+        if not self._ocr_engine or end is None:
+            return ""
+        
+        all_text = []
+        for page_num in range(start, min(end, len(doc))):
+            page = doc[page_num]
+            
+            # 获取页面图片（300 DPI，平衡质量和速度）
+            pix = page.get_pixmap(dpi=300)
+            
+            # 转换为 numpy 数组 (RGB)
+            import numpy as np
+            img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width, 3
+            )
+            
+            try:
+                ocr_result, _ = self._ocr_engine(img_array)
+                if not ocr_result:
+                    continue
+                
+                # 按行排序（从上到下）
+                lines_sorted = sorted(ocr_result, key=lambda x: x[0][0][1])
+                page_text = " ".join([line[1] for line in lines_sorted])
+                
+                if page_text.strip():
+                    all_text.append(page_text.strip())
+            
+            except Exception as e:
+                print(f"      ⚠️ OCR 识别失败 (第 {page_num + 1} 页): {e}")
+        
+        return '\n\n'.join(all_text)
     
     def _get_next_bookmark_page(self, bookmarks: List[BookmarkInfo], current_idx: int) -> Optional[int]:
         """

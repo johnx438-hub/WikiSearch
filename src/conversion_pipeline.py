@@ -148,16 +148,28 @@ class QualityChecker:
     
     Stage 0: 零成本规则拦截（断言层）
     Stage 1: 启发式打分
-    Stage 2: LLM 局部修复（可选）
+    Stage 2: LLM 局部修复（可选，带超时+重试）
     Stage 3: LLM 全量转写兜底
+    
+    Attributes:
+        llm_model: LLM 模型名称（默认 qwen2.5:7b）
+        llm_timeout: 单次调用超时秒数（默认 60s）
+        max_retries: 最大重试次数（默认 2）
     """
     
-    def __init__(self):
+    def __init__(self, llm_model: str = "qwen2.5:7b", 
+                 llm_backend: str = "ollama",
+                 llm_timeout: int = 60, max_retries: int = 2):
         self.stage_thresholds = {
             'stage_0_fail': 0.3,   # Stage 0 失败 → score < 0.3
             'stage_1_low': 0.5,    # Stage 1 低分 → score < 0.5
             'stage_2_trigger': 0.8, # Stage 2 触发 → 0.5 <= score < 0.8
         }
+        # LLM 修复配置
+        self.llm_model = llm_model
+        self.llm_backend = llm_backend
+        self.llm_timeout = llm_timeout
+        self.max_retries = max_retries
     
     def check(self, sections: List[dict]) -> QualityCheckResult:
         """
@@ -208,14 +220,44 @@ class QualityChecker:
                 needs_llm_fix=True
             )
         
+        elif stage_1_score >= self.stage_thresholds['stage_1_low']:
+            # 0.5 <= Score < 0.8 → LLM 局部修复（带超时重试）
+            fixed_sections = self._llm_local_fix(sections)
+            if fixed_sections:
+                # 重新打分验证修复效果
+                recheck_score = self._stage_1_heuristic_scoring(fixed_sections)
+                return QualityCheckResult(
+                    score=recheck_score,
+                    issues=[],
+                    stage=2,
+                    needs_llm_fix=False
+                )
+            else:
+                return QualityCheckResult(
+                    score=stage_1_score,
+                    issues=['LLM 局部修复失败，建议人工检查'],
+                    stage=2,
+                    needs_llm_fix=True
+                )
+        
         else:
-            # Score < 0.5 → LLM 全量转写兜底
-            return QualityCheckResult(
-                score=stage_1_score,
-                issues=['质量较低，建议 LLM 全量转写'],
-                stage=3,
-                needs_llm_fix=True
-            )
+            # Score < 0.5 → LLM 全量转写兜底（带超时重试）
+            fixed_sections = self._llm_full_rewrite(sections)
+            if fixed_sections:
+                recheck_score = self._stage_1_heuristic_scoring(fixed_sections)
+                return QualityCheckResult(
+                    score=recheck_score,
+                    issues=[],
+                    stage=3,
+                    needs_llm_fix=False
+                )
+            else:
+                return QualityCheckResult(
+                    score=stage_1_score,
+                    issues=['LLM 全量转写失败，建议人工检查'],
+                    stage=3,
+                    needs_llm_fix=True
+                )
     
     def _stage_0_assertions(self, sections: List[dict]) -> dict:
         """
@@ -398,6 +440,164 @@ class QualityChecker:
         )
         
         return complete_count / len(sections)
+    
+    # ==================== LLM 修复接口（带超时+重试）====================
+    
+    def _call_llm(self, prompt: str, system_prompt: str = "") -> Optional[str]:
+        """
+        调用 LLM 并返回结果（支持超时和重试）。
+        
+        Args:
+            prompt: 用户提示词
+            system_prompt: 系统提示词
+            
+        Returns:
+            LLM 响应文本，失败返回 None
+        """
+        import json
+        import urllib.request
+        
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                payload = json.dumps({
+                    "model": self.llm_model,
+                    "prompt": prompt,
+                    "system": system_prompt,
+                    "stream": False,
+                }).encode("utf-8")
+                
+                req = urllib.request.Request(
+                    f"http://localhost:11434/api/generate",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                
+                with urllib.request.urlopen(req, timeout=self.llm_timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                    return result.get("response", "").strip()
+            
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+                print(f"      ⚠️ LLM 调用失败 (尝试 {attempt}/{self.max_retries}): {e}")
+                if attempt < self.max_retries:
+                    import time
+                    time.sleep(1 * attempt)  # 指数退避：1s, 2s...
+        
+        return None
+    
+    def _llm_local_fix(self, sections: List[dict]) -> Optional[List[dict]]:
+        """
+        Stage 2: LLM 局部修复——针对结构不完整的章节做针对性补全。
+        
+        Args:
+            sections: 原始章节列表
+            
+        Returns:
+            修复后的章节列表，失败返回 None
+        """
+        if not sections or len(sections) > 50:
+            return sections  # 太多章节直接跳过
+        
+        system_prompt = (
+            "你是一个文档结构修复助手。你的任务是根据提供的原始内容，"
+            "补全缺失的标题层级和段落结构，输出格式化的 Markdown。"
+        )
+        
+        # 构建 prompt：把所有章节拼成一段描述
+        section_descriptions = []
+        for i, sec in enumerate(sections):
+            content_preview = sec.get('content', '')[:500]  # 限制长度避免超时
+            section_descriptions.append(
+                f"## {sec.get('title', f'章节{i+1}')}\n{content_preview}"
+            )
+        
+        prompt = (
+            f"请修复以下文档的结构问题（补全标题层级、清理乱码、规范化格式）：\n\n"
+            + "\n\n".join(section_descriptions) + 
+            "\n\n请直接输出修复后的 Markdown 内容，不要添加额外说明。"
+        )
+        
+        fixed_text = self._call_llm(prompt, system_prompt)
+        if not fixed_text:
+            return None
+        
+        # 解析修复结果：按 ## 标题分割回章节列表
+        import re
+        fixed_sections = []
+        parts = re.split(r'(?=^## )', fixed_text, flags=re.MULTILINE)
+        for i, part in enumerate(parts):
+            part = part.strip()
+            if not part:
+                continue
+            heading_match = re.match(r'^## (.+?)\n(.*)', part, re.DOTALL)
+            if heading_match:
+                fixed_sections.append({
+                    'title': heading_match.group(1).strip(),
+                    'content': heading_match.group(2).strip(),
+                    'heading_level': 2,
+                    'parent_title': sections[i].get('parent_title', '') if i < len(sections) else '',
+                    'page_range': sections[i].get('page_range', '1') if i < len(sections) else '1',
+                    'conversion_method': sections[i].get('conversion_method', 'unknown'),
+                    'metadata': {**sections[i].get('metadata', {}), 'llm_fixed': True},
+                })
+        
+        return fixed_sections if fixed_sections else None
+    
+    def _llm_full_rewrite(self, sections: List[dict]) -> Optional[List[dict]]:
+        """
+        Stage 3: LLM 全量转写兜底——把原始内容交给 LLM 重新生成结构化 Markdown。
+        
+        Args:
+            sections: 原始章节列表
+            
+        Returns:
+            修复后的章节列表，失败返回 None
+        """
+        if not sections:
+            return None
+        
+        system_prompt = (
+            "你是一个专业的文档转写助手。请将提供的原始内容转换为结构清晰的 Markdown 格式，"
+            "包含合理的标题层级（# H1, ## H2, ### H3）和段落划分。"
+        )
+        
+        # 合并所有章节内容为一段文本
+        full_text = "\n\n".join(
+            f"{sec.get('title', '')}\n{sec.get('content', '')}" 
+            for sec in sections
+        )[:2000]  # 限制长度避免超时
+        
+        prompt = (
+            f"请将以下内容转换为结构化的 Markdown 文档：\n\n{full_text}\n\n"
+            "要求：使用 # ## ### 标题层级，合理分段，清理乱码。直接输出结果。"
+        )
+        
+        rewritten = self._call_llm(prompt, system_prompt)
+        if not rewritten:
+            return None
+        
+        # 解析为章节列表（按 H1-H3 分割）
+        import re
+        fixed_sections = []
+        parts = re.split(r'(?=^#{1,3} )', rewritten, flags=re.MULTILINE)
+        for i, part in enumerate(parts):
+            part = part.strip()
+            if not part:
+                continue
+            heading_match = re.match(r'^(#{1,3}) (.+?)\n(.*)', part, re.DOTALL)
+            if heading_match:
+                level = len(heading_match.group(1))  # # → 1, ## → 2
+                fixed_sections.append({
+                    'title': heading_match.group(2).strip(),
+                    'content': heading_match.group(3).strip(),
+                    'heading_level': level,
+                    'parent_title': '',
+                    'page_range': sections[0].get('page_range', '1'),
+                    'conversion_method': sections[0].get('conversion_method', 'unknown'),
+                    'metadata': {**sections[0].get('metadata', {}), 'llm_rewritten': True},
+                })
+        
+        return fixed_sections if fixed_sections else None
 
 
 # ==================== 树状 MD 生成器 ====================
