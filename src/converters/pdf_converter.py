@@ -86,17 +86,20 @@ class PdfConverter:
     """
     
     def __init__(self, use_ocr: bool = True, ocr_language: str = 'chi_sim+eng', 
-                 chunk_size: int = 50, ocr_use_cuda: bool = False):
+                 chunk_size: int = 50, ocr_use_cuda: bool = False,
+                 ocr_min_chars_per_page: int = 50):
         """
         Args:
             use_ocr: 是否启用 OCR 回退（默认 True）
             ocr_language: OCR 语言 ('chi_sim' | 'eng' | 'chi_sim+eng')
             chunk_size: 超大文件分块处理大小（默认 50 页/块）
             ocr_use_cuda: 是否使用 CUDA 加速（默认 False，纯 CPU）
+            ocr_min_chars_per_page: 单页字符数阈值，低于此值才触发 OCR（默认 50）
         """
         self.use_ocr = use_ocr
         self.ocr_language = ocr_language
         self.chunk_size = chunk_size
+        self.ocr_min_chars_per_page = ocr_min_chars_per_page
         self._pymupdf4llm_available = HAS_PYMUPDF4LLM
         
         # 初始化 RapidOCR 引擎（惰性加载，避免无 OCR 需求时浪费资源）
@@ -444,12 +447,42 @@ class PdfConverter:
                 print(f"⚠️ PyMuPDF4LLM 提取失败，回退到原生提取: {e}")
                 text = self._extract_with_pymupdf(doc, start, end)
         
-        # OCR 回退：如果文本太少或为空，尝试 OCR
+        # OCR 回退：按单页字符数阈值判断（避免无效 OCR 浪费资源）
         if self.use_ocr and self._ocr_engine:
-            ocr_text = self._extract_with_ocr(doc, start, end)
-            if ocr_text and len(ocr_text.strip()) > len(text.strip()):
-                print(f"      🔍 OCR 回退触发：原生文本 {len(text)} 字 → OCR {len(ocr_text)} 字")
-                text = ocr_text
+            pages_to_ocr = []
+            for page_num in range(start, min(end or len(doc), len(doc))):
+                page_text = doc[page_num].get_text("text").strip()
+                if len(page_text) < self.ocr_min_chars_per_page:
+                    pages_to_ocr.append(page_num)
+            
+            if pages_to_ocr:
+                # 只对有问题的页面做 OCR，然后拼接回原文本
+                ocr_patches = {}
+                for page_num in pages_to_ocr:
+                    pix = doc[page_num].get_pixmap(dpi=300)
+                    import numpy as np
+                    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                        pix.height, pix.width, 3
+                    )
+                    try:
+                        ocr_result, _ = self._ocr_engine(img_array)
+                        if ocr_result:
+                            lines_sorted = sorted(ocr_result, key=lambda x: x[0][0][1])
+                            page_ocr_text = " ".join([line[1] for line in lines_sorted])
+                            if page_ocr_text.strip():
+                                ocr_patches[page_num] = page_ocr_text.strip()
+                    except Exception as e:
+                        print(f"      ⚠️ OCR 识别失败 (第 {page_num + 1} 页): {e}")
+                
+                # 如果有 OCR 结果，替换原文本中对应页面内容
+                if ocr_patches:
+                    text_pages = text.split('\n\n')
+                    for page_num, ocr_text in ocr_patches.items():
+                        idx = page_num - start
+                        if 0 <= idx < len(text_pages):
+                            text_pages[idx] = ocr_text
+                    text = '\n\n'.join(text_pages)
+                    print(f"      🔍 OCR 回退触发：{len(ocr_patches)} 页低密度页面已修复")
         
         return text
     

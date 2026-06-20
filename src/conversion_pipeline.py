@@ -153,12 +153,14 @@ class QualityChecker:
     
     Attributes:
         llm_model: LLM 模型名称（默认 qwen2.5:7b）
+        llm_fix_enabled: 是否启用 LLM 修复（默认 False，避免无 Ollama 时卡死）
         llm_timeout: 单次调用超时秒数（默认 60s）
         max_retries: 最大重试次数（默认 2）
     """
     
     def __init__(self, llm_model: str = "qwen2.5:7b", 
                  llm_backend: str = "ollama",
+                 llm_fix_enabled: bool = False,
                  llm_timeout: int = 60, max_retries: int = 2):
         self.stage_thresholds = {
             'stage_0_fail': 0.3,   # Stage 0 失败 → score < 0.3
@@ -168,6 +170,7 @@ class QualityChecker:
         # LLM 修复配置
         self.llm_model = llm_model
         self.llm_backend = llm_backend
+        self.llm_fix_enabled = llm_fix_enabled
         self.llm_timeout = llm_timeout
         self.max_retries = max_retries
     
@@ -212,51 +215,47 @@ class QualityChecker:
             )
         
         elif stage_1_score >= self.stage_thresholds['stage_1_low']:
-            # 0.5 <= Score < 0.8 → LLM 局部修复
-            return QualityCheckResult(
-                score=stage_1_score,
-                issues=['结构不完整，建议 LLM 修复'],
-                stage=2,
-                needs_llm_fix=True
-            )
-        
-        elif stage_1_score >= self.stage_thresholds['stage_1_low']:
-            # 0.5 <= Score < 0.8 → LLM 局部修复（带超时重试）
-            fixed_sections = self._llm_local_fix(sections)
-            if fixed_sections:
-                # 重新打分验证修复效果
-                recheck_score = self._stage_1_heuristic_scoring(fixed_sections)
-                return QualityCheckResult(
-                    score=recheck_score,
-                    issues=[],
-                    stage=2,
-                    needs_llm_fix=False
-                )
+            # 0.5 <= Score < 0.8 → LLM 局部修复（需开启 llm_fix_enabled）
+            if self.llm_fix_enabled:
+                fixed_sections = self._llm_local_fix(sections)
+                if fixed_sections:
+                    recheck_score = self._stage_1_heuristic_scoring(fixed_sections)
+                    return QualityCheckResult(
+                        score=recheck_score, issues=[], stage=2, needs_llm_fix=False
+                    )
+                else:
+                    return QualityCheckResult(
+                        score=stage_1_score,
+                        issues=['LLM 局部修复失败，建议人工检查'],
+                        stage=2, needs_llm_fix=True
+                    )
             else:
                 return QualityCheckResult(
                     score=stage_1_score,
-                    issues=['LLM 局部修复失败，建议人工检查'],
-                    stage=2,
-                    needs_llm_fix=True
+                    issues=['结构不完整（启用 --llm-fix 可尝试 LLM 自动修复）'],
+                    stage=2, needs_llm_fix=True
                 )
         
         else:
-            # Score < 0.5 → LLM 全量转写兜底（带超时重试）
-            fixed_sections = self._llm_full_rewrite(sections)
-            if fixed_sections:
-                recheck_score = self._stage_1_heuristic_scoring(fixed_sections)
-                return QualityCheckResult(
-                    score=recheck_score,
-                    issues=[],
-                    stage=3,
-                    needs_llm_fix=False
-                )
+            # Score < 0.5 → LLM 全量转写兜底（需开启 llm_fix_enabled）
+            if self.llm_fix_enabled:
+                fixed_sections = self._llm_full_rewrite(sections)
+                if fixed_sections:
+                    recheck_score = self._stage_1_heuristic_scoring(fixed_sections)
+                    return QualityCheckResult(
+                        score=recheck_score, issues=[], stage=3, needs_llm_fix=False
+                    )
+                else:
+                    return QualityCheckResult(
+                        score=stage_1_score,
+                        issues=['LLM 全量转写失败，建议人工检查'],
+                        stage=3, needs_llm_fix=True
+                    )
             else:
                 return QualityCheckResult(
                     score=stage_1_score,
-                    issues=['LLM 全量转写失败，建议人工检查'],
-                    stage=3,
-                    needs_llm_fix=True
+                    issues=['质量较低（启用 --llm-fix 可尝试 LLM 自动修复）'],
+                    stage=3, needs_llm_fix=True
                 )
     
     def _stage_0_assertions(self, sections: List[dict]) -> dict:
@@ -780,11 +779,13 @@ class ConversionPipeline:
         output_dir: Markdown 输出目录
     """
     
-    def __init__(self, db_path: str = "./wiki_db", output_dir: Optional[str] = None):
+    def __init__(self, db_path: str = "./wiki_db", output_dir: Optional[str] = None,
+                 llm_fix_enabled: bool = False):
         """
         Args:
             db_path: SQLite 数据库路径（用于 file_registry）
             output_dir: Markdown 输出目录（如果提供，会生成树状 MD 文件）
+            llm_fix_enabled: 是否启用 LLM 质量修复（默认 False，避免无 Ollama 时卡死）
         """
         self.db_path = Path(db_path)
         self.output_dir = output_dir or str(self.db_path / "converted_md")
@@ -792,7 +793,7 @@ class ConversionPipeline:
         
         # 初始化组件
         self.router = Router()
-        self.quality_checker = QualityChecker()
+        self.quality_checker = QualityChecker(llm_fix_enabled=llm_fix_enabled)
         self.tree_generator = TreeGenerator(base_dir=self.output_dir)
     
     def convert(self, filepath: str) -> ConversionResult:

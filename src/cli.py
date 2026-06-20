@@ -358,11 +358,14 @@ def cmd_convert(args):
     output_dir = args.output_dir or "./wiki_db/converted_md"
     pipeline = ConversionPipeline(
         db_path="./wiki_db",
-        output_dir=output_dir
+        output_dir=output_dir,
+        llm_fix_enabled=getattr(args, 'llm_fix', False)
     )
     
     print(f"🔄 开始转换: {os.path.basename(file_path)}")
     print(f"   输出目录: {output_dir}")
+    if getattr(args, 'llm_fix', False):
+        print(f"   LLM 修复: ✅ 已启用 (需 Ollama)")
     
     try:
         result = pipeline.convert(file_path)
@@ -478,6 +481,8 @@ def main():
                                 help="Markdown 输出目录 (默认: ./wiki_db/converted_md)")
     convert_parser.add_argument("--index", action="store_true",
                                 help="转换完成后自动建立索引")
+    convert_parser.add_argument("--llm-fix", action="store_true",
+                                help="启用 LLM 质量修复（需 Ollama，默认关闭避免无模型时卡死）")
     convert_parser.set_defaults(func=cmd_convert)
     
     args = parser.parse_args()
