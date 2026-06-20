@@ -293,7 +293,7 @@ turbovecWikiTest01/
 
 | 指标 | 设计值 | 实测值 | 备注 |
 |------|--------|--------|------|
-| Embedding 维度 | 768 (bge-m3) | **4096** (qwen3-embedding:8b) | Ollama 实际可用模型 |
+| Embedding 维度 | 4096 (qwen3-embedding:8b) | **4096** (qwen3-embedding:8b) | Ollama 实际可用模型 |
 | 压缩率 | 16x (理论) | **8.0x** | 4-bit，受维度对齐影响 |
 | BM25 → allowlist 加速 | ≥3x（候选<10%） | **1.2x**（测试数据量小） | 大数据量下预期提升明显 |
 | 中文分词 | Whoosh 内置 | **jieba** | 开箱即用，效果好 |
