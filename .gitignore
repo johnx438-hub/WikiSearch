@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Database files (generated)
+wiki_db/*.db
+wiki_db/*.tvim
+wiki_db/index/
+
+# Test artifacts
+tests/__pycache__/
+tests/test_*.pdf
+tests/*.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

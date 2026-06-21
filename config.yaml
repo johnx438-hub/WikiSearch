@@ -1,0 +1,31 @@
+# WikiSearch 配置文件
+# ====================
+
+# 监控的文档目录（支持多个）
+watch_dirs:
+  - ./docs
+
+# 支持的文件扩展名
+supported_extensions:
+  - .md
+  - .docx
+  - .pdf
+
+# 忽略的文件/目录模式（fnmatch 格式）
+ignore_patterns:
+  - __pycache__
+  - "*.tmp"
+  - "*.bak"
+  - converted_md          # 转换管道中间产物，不索引
+
+# Embedding 模型配置
+embedding:
+  backend: ollama              # ollama / openai
+  model_name: qwen3-embedding:8b  # Ollama 模型名称
+  api_url: http://localhost:11434/api/embeddings
+
+# 索引配置
+indexing:
+  db_path: ./wiki_db           # 数据库存储路径
+  dim: null                    # 向量维度（null=自动检测）
+  bit_width: 4                 # TurboVec 压缩位数（2/3/4）
