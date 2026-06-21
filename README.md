@@ -10,6 +10,8 @@
 - ⚡ **增量同步** — SHA256 Hash 驱动，只处理变化文件
 - 💾 **SQLite 持久化** — DocStore/FileRegistry 跨会话保留数据
 - 📊 **分层切片** — L1 章节 + L2 段落，父子联动检索
+- 🔗 **WikiLink 双链** — `[[Link]]` 自动解析 + 反向链接查询 (`wiki neighbors`)
+- 📄 **Office/PDF 转换** — DOCX/PPTX/XLSX/PDF → Markdown 结构化输出
 - 🔧 **CLI 友好** — 命令行管理索引、搜索、统计
 
 ---
@@ -47,6 +49,7 @@ python -m src.cli search "TurboVec压缩率" --top 5
 | `wiki init` | 生成 config.yaml（含 embedding 配置） |
 | `wiki sync` | 增量同步目录到索引 |
 | `wiki search <query>` | 混合检索 + 格式化输出 |
+| `wiki neighbors <title>` | 查找引用 [[标题]] 的笔记（反向链接） |
 | `wiki list [--status]` | 列出已索引文件（支持状态过滤） |
 | `wiki show <path>` | 查看原文 |
 | `wiki stats` | 查看统计信息 |
@@ -76,9 +79,8 @@ CLI → WikiIndex → BM25(Whoosh) + TurboVec(IdMapIndex) + DocStore(SQLite)
 
 ## 🔮 后续规划
 
-- **Phase 4**: 转换路由器（pandoc/markitdown/mineru）支持 Office + PDF
-- **Phase 5**: GUI 前端（Tauri/PyQt6）类 Obsidian 体验
-- **Phase 6**: 企业级特性（权限控制/协作编辑/API 服务）
+- **Phase 5**: GUI 前端（Tauri/PyQt6）类 Obsidian 体验 — 文件树 + Markdown 编辑器 + 知识图谱可视化
+- **Phase 6**: 企业级特性（权限控制/协作编辑/API 服务/MCP Server）
 
 ---
 

@@ -345,6 +345,33 @@ def cmd_stats(args):
             print(f"   - {os.path.basename(err['file_path'])}: {err['error_message']}")
 
 
+def cmd_neighbors(args):
+    """查找引用 [[title]] 的笔记（反向链接）"""
+    from src.wiki_index import WikiIndex
+    
+    config = load_config(args.config or "config.yaml")
+    db_path = config.get("indexing", {}).get("db_path", "./wiki_db")
+    
+    idx = WikiIndex(db_path=db_path)
+    
+    neighbors = idx.get_neighbors(args.title, limit=args.limit)
+    
+    if not neighbors:
+        print(f"🔍 \"[[{args.title}]]\" → 未找到反向链接")
+        return
+    
+    print(f"\n🔗 \"{args.title}\" 被以下 {len(neighbors)} 条笔记引用:\n")
+    print("=" * 60)
+    
+    for i, n in enumerate(neighbors, 1):
+        file_name = os.path.basename(n.get("filepath", ""))
+        print(f"\n[{i}] 📄 {file_name}")
+        print(f"    标题: {n['title']}")
+        print(f"    预览: {n['preview'][:80]}...")
+        if n.get('links'):
+            print(f"    全部链接: {', '.join('[[' + l + ']]' for l in n['links'])}")
+
+
 def cmd_convert(args):
     """Phase 4: 将 DOCX/PDF 转换为结构化 Markdown"""
     from src.conversion_pipeline import ConversionPipeline
@@ -473,6 +500,12 @@ def main():
     # stats 命令
     stats_parser = subparsers.add_parser("stats", help="查看统计信息")
     stats_parser.set_defaults(func=cmd_stats)
+    
+    # neighbors 命令 (WikiLink 反向链接查询)
+    neighbors_parser = subparsers.add_parser("neighbors", help="查找引用 [[标题]] 的笔记（反向链接）")
+    neighbors_parser.add_argument("title", type=str, help="目标笔记标题/关键词")
+    neighbors_parser.add_argument("--limit", "-l", type=int, default=50, help="最大返回数量 (默认: 50)")
+    neighbors_parser.set_defaults(func=cmd_neighbors)
     
     # convert 命令 (Phase 4: Office+PDF 转换管道)
     convert_parser = subparsers.add_parser("convert", help="将 DOCX/PDF 转换为结构化 Markdown")

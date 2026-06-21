@@ -101,6 +101,7 @@ class WikiIndex:
             file_id=STORED,                  # UUID5 文件 ID（关联到 FileRegistry）
             chunk_order=STORED,              # 在所属层级中的序号
             total_chunks=STORED,             # 文档总chunk数
+            links=TEXT(stored=True, field_boost=1.0),  # [[WikiLink]] 双链引用（JSON数组字符串，支持搜索）
         )
         
         if not self.db_path.exists():
@@ -223,6 +224,7 @@ class WikiIndex:
                 "parent_id": parent_id_str,
                 "chunk_order": chunk.order,
                 "total_chunks": len(chunks),
+                "links": json.dumps(chunk.links, ensure_ascii=False) if chunk.links else "",
             }
             
             # 写入BM25索引
@@ -399,6 +401,60 @@ class WikiIndex:
             enriched_results.append(result)
         
         return enriched_results
+    
+    def get_neighbors(self, target_title: str, limit: int = 50) -> List[dict]:
+        """
+        查找所有引用了 [[target_title]] 的 chunk（反向链接）。
+        
+        Args:
+            target_title: 目标笔记标题/关键词
+            limit: 最大返回数量
+            
+        Returns:
+            [{id, title, filepath, preview, links}, ...]
+            
+        Example:
+            >>> idx.get_neighbors("Obsidian")
+            [{id: 123, title: "双链笔记", filepath: "...", preview: "这是[[Obsidian]]的例子...", links: ["Obsidian"]}]
+        """
+        from whoosh.qparser import QueryParser
+        
+        schema = self.bm25_index.schema
+        query_parser = QueryParser("links", schema=schema)
+        
+        results = []
+        try:
+            query = query_parser.parse(target_title)
+            with self.bm25_index.searcher() as searcher:
+                hits = list(searcher.search(query, limit=limit))
+                
+                for hit in hits:
+                    doc_id = int(hit['id'])
+                    info = self._doc_store.get(doc_id)
+                    if not info:
+                        continue
+                    
+                    # 验证 links 确实包含目标标题
+                    stored_links = info["metadata"].get("links", [])
+                    if isinstance(stored_links, str):
+                        try:
+                            import json as _json
+                            stored_links = _json.loads(stored_links) or []
+                        except Exception:
+                            stored_links = []
+                    
+                    if target_title in stored_links:
+                        results.append({
+                            "id": doc_id,
+                            "title": info["title"],
+                            "filepath": info.get("filepath", ""),
+                            "preview": info["content"][:150],
+                            "links": stored_links,
+                        })
+        except Exception as e:
+            print(f"⚠️ get_neighbors 查询失败: {e}")
+        
+        return results
     
     def format_search_result(self, result: dict) -> str:
         """
@@ -802,6 +858,7 @@ class WikiIndex:
                 "chunk_order": chunk.order,
                 "total_chunks": len(chunks),
                 "file_id": file_id,
+                "links": json.dumps(chunk.links, ensure_ascii=False) if chunk.links else "",
             })
         
         # 6. 批量生成 Embedding（Ollama batch API）

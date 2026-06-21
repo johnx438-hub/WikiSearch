@@ -27,6 +27,28 @@ class Chunk:
     chunk_type: str       # "L1" (章节) or "L2" (段落)
     parent_id: Optional[int]   # L2的parent是L1的id
     order: int            # 在所属层级中的序号（从1开始）
+    links: List[str] = None     # [[WikiLink]] 提取的双链引用
+    
+    def __post_init__(self):
+        if self.links is None:
+            self.links = []
+
+
+def extract_links(content: str) -> List[str]:
+    """
+    从 Markdown 内容中提取 [[WikiLink]] 引用。
+    
+    Args:
+        content: Markdown 文本
+        
+    Returns:
+        去重后的链接标题列表
+        
+    Example:
+        >>> extract_links("这是[[Obsidian]]和[[双链笔记]]的例子")
+        ['Obsidian', '双链笔记']
+    """
+    return list(set(re.findall(r'\[\[([^\]]+)\]\]', content)))
 
 
 class MarkdownChunker:
@@ -96,6 +118,7 @@ class MarkdownChunker:
                 chunk_type="L1",
                 parent_id=None,
                 order=1,
+                links=extract_links(content),
             ))
             return chunks
         
@@ -119,6 +142,7 @@ class MarkdownChunker:
                 chunk_type="L1",
                 parent_id=None,
                 order=l1_order,
+                links=extract_links(l1_content),
             ))
             
             # L2 chunks: 按段落分割
@@ -134,6 +158,7 @@ class MarkdownChunker:
                     chunk_type="L2",
                     parent_id=None,  # 实际parent在WikiIndex中通过metadata记录
                     order=i + 1,
+                    links=extract_links(para),
                 ))
         
         return chunks
@@ -154,6 +179,7 @@ class MarkdownChunker:
                 chunk_type="L1",  # 扁平模式下所有chunk都是L1
                 parent_id=None,
                 order=i + 1,
+                links=extract_links(chunk),
             ))
         
         return result
@@ -172,6 +198,7 @@ class MarkdownChunker:
                 chunk_type="L1",
                 parent_id=None,
                 order=1,
+                links=extract_links(content),
             )]
         
         # 长文档：按章节分割，每个章节内自适应调整（支持 H1-H6）
@@ -197,6 +224,7 @@ class MarkdownChunker:
                     chunk_type="L1",
                     parent_id=None,
                     order=order,
+                    links=extract_links(f"{heading}\n\n{body}"),
                 ))
             else:
                 # 长章节：拆分为L2段落
@@ -209,6 +237,7 @@ class MarkdownChunker:
                         chunk_type="L2",
                         parent_id=None,
                         order=i + 1,
+                        links=extract_links(para),
                     ))
         
         return chunks
